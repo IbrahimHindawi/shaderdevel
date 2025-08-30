@@ -1,355 +1,549 @@
+// main.c — single-file Win32 + WGL + modern OpenGL triangle (core profile)
+// Build (MSVC):
+//   cl /Zi /W3 /DUNICODE /D_UNICODE main.c user32.lib gdi32.lib opengl32.lib
+// Build (MinGW):
+//   gcc -O2 -municode main.c -lgdi32 -lopengl32 -o app.exe
+
 #define UNICODE
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
-#define WIN_32_EXTRA_LEAN
-#include "glad/glad.h"
-#include "glad/glad_wgl.h"
+#define STRICT
 #include <windows.h>
-#include <stdint.h>
+#include <wingdi.h>
+#include <gl/GL.h>
+#include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include <stddef.h>   // ptrdiff_t
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-
-#define WGL_CONTEXT_PROFILE_MASK_ARB 0x9126
 
 #pragma comment(lib, "opengl32.lib")
 
-// ============================== App State ==============================
-typedef struct {
-    int cols, rows;
-    bool paused;
-    int frame;
-    double startSec;
-    double pausedAccum;
-    double lastReloadCheck;
-    int seed;
-    int winW, winH;
-    float mouseX, mouseY;
-    int mouseDown;
-} AppState;
+// ============================= Config ==============================
+static const bool  g_fullscreen    = false;
+static const bool  g_vsync_enabled = true;
+static const float g_screen_near   = 0.1f;
+static const float g_screen_far    = 1000.0f;
 
-typedef struct {
-    HINSTANCE hInst;
+// =================== Minimal WGL extension defs ====================
+#define WGL_DRAW_TO_WINDOW_ARB           0x2001
+#define WGL_ACCELERATION_ARB             0x2003
+#define WGL_SWAP_METHOD_ARB              0x2007
+#define WGL_SUPPORT_OPENGL_ARB           0x2010
+#define WGL_DOUBLE_BUFFER_ARB            0x2011
+#define WGL_PIXEL_TYPE_ARB               0x2013
+#define WGL_COLOR_BITS_ARB               0x2014
+#define WGL_DEPTH_BITS_ARB               0x2022
+#define WGL_STENCIL_BITS_ARB             0x2023
+#define WGL_FULL_ACCELERATION_ARB        0x2027
+#define WGL_SWAP_EXCHANGE_ARB            0x2028
+#define WGL_TYPE_RGBA_ARB                0x202B
+#define WGL_CONTEXT_MAJOR_VERSION_ARB    0x2091
+#define WGL_CONTEXT_MINOR_VERSION_ARB    0x2092
+#define WGL_CONTEXT_PROFILE_MASK_ARB     0x9126
+#define WGL_CONTEXT_CORE_PROFILE_BIT_ARB 0x00000001
+
+typedef BOOL  (WINAPI *PFNWGLCHOOSEPIXELFORMATARBPROC)(HDC,const int*,const FLOAT*,UINT,int*,UINT*);
+typedef HGLRC (WINAPI *PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC,HGLRC,const int*);
+typedef BOOL  (WINAPI *PFNWGLSWAPINTERVALEXTPROC)(int);
+
+static PFNWGLCHOOSEPIXELFORMATARBPROC    p_wglChoosePixelFormatARB    = NULL;
+static PFNWGLCREATECONTEXTATTRIBSARBPROC p_wglCreateContextAttribsARB = NULL;
+static PFNWGLSWAPINTERVALEXTPROC         p_wglSwapIntervalEXT         = NULL;
+
+// ============ Modern GL enums missing from legacy <GL/gl.h> ========
+#ifndef GL_ARRAY_BUFFER
+#define GL_ARRAY_BUFFER                0x8892
+#endif
+#ifndef GL_STATIC_DRAW
+#define GL_STATIC_DRAW                 0x88E4
+#endif
+#ifndef GL_VERTEX_SHADER
+#define GL_VERTEX_SHADER               0x8B31
+#endif
+#ifndef GL_FRAGMENT_SHADER
+#define GL_FRAGMENT_SHADER             0x8B30
+#endif
+#ifndef GL_COMPILE_STATUS
+#define GL_COMPILE_STATUS              0x8B81
+#endif
+#ifndef GL_LINK_STATUS
+#define GL_LINK_STATUS                 0x8B82
+#endif
+#ifndef GL_INFO_LOG_LENGTH
+#define GL_INFO_LOG_LENGTH             0x8B84
+#endif
+
+// ======= Minimal modern GL function pointers (no loader libs) ======
+typedef char GLchar;
+
+typedef void   (APIENTRY *PFNGLGENVERTEXARRAYSPROC)(GLsizei, GLuint*);
+typedef void   (APIENTRY *PFNGLBINDVERTEXARRAYPROC)(GLuint);
+typedef void   (APIENTRY *PFNGLGENBUFFERSPROC)(GLsizei, GLuint*);
+typedef void   (APIENTRY *PFNGLBINDBUFFERPROC)(GLenum, GLuint);
+typedef void   (APIENTRY *PFNGLBUFFERDATAPROC)(GLenum, ptrdiff_t, const void*, GLenum);
+typedef GLuint (APIENTRY *PFNGLCREATESHADERPROC)(GLenum);
+typedef void   (APIENTRY *PFNGLSHADERSOURCEPROC)(GLuint, GLsizei, const GLchar* const*, const GLint*);
+typedef void   (APIENTRY *PFNGLCOMPILESHADERPROC)(GLuint);
+typedef void   (APIENTRY *PFNGLGETSHADERIVPROC)(GLuint, GLenum, GLint*);
+typedef void   (APIENTRY *PFNGLGETSHADERINFOLOGPROC)(GLuint, GLsizei, GLsizei*, GLchar*);
+typedef GLuint (APIENTRY *PFNGLCREATEPROGRAMPROC)(void);
+typedef void   (APIENTRY *PFNGLATTACHSHADERPROC)(GLuint, GLuint);
+typedef void   (APIENTRY *PFNGLLINKPROGRAMPROC)(GLuint);
+typedef void   (APIENTRY *PFNGLGETPROGRAMIVPROC)(GLuint, GLenum, GLint*);
+typedef void   (APIENTRY *PFNGLGETPROGRAMINFOLOGPROC)(GLuint, GLsizei, GLsizei*, GLchar*);
+typedef void   (APIENTRY *PFNGLDELETEPROGRAMPROC)(GLuint);
+typedef void   (APIENTRY *PFNGLDELETESHADERPROC)(GLuint);
+typedef void   (APIENTRY *PFNGLUSEPROGRAMPROC)(GLuint);
+typedef void   (APIENTRY *PFNGLVERTEXATTRIBPOINTERPROC)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
+typedef void   (APIENTRY *PFNGLENABLEVERTEXATTRIBARRAYPROC)(GLuint);
+typedef GLint  (APIENTRY *PFNGLGETATTRIBLOCATIONPROC)(GLuint, const GLchar*);
+
+static PFNGLGENVERTEXARRAYSPROC         glGenVertexArrays     = NULL;
+static PFNGLBINDVERTEXARRAYPROC         glBindVertexArray     = NULL;
+static PFNGLGENBUFFERSPROC              glGenBuffers          = NULL;
+static PFNGLBINDBUFFERPROC              glBindBuffer          = NULL;
+static PFNGLBUFFERDATAPROC              glBufferData          = NULL;
+static PFNGLCREATESHADERPROC            glCreateShader        = NULL;
+static PFNGLSHADERSOURCEPROC            glShaderSource        = NULL;
+static PFNGLCOMPILESHADERPROC           glCompileShader       = NULL;
+static PFNGLGETSHADERIVPROC             glGetShaderiv         = NULL;
+static PFNGLGETSHADERINFOLOGPROC        glGetShaderInfoLog    = NULL;
+static PFNGLCREATEPROGRAMPROC           glCreateProgram       = NULL;
+static PFNGLATTACHSHADERPROC            glAttachShader        = NULL;
+static PFNGLLINKPROGRAMPROC             glLinkProgram         = NULL;
+static PFNGLGETPROGRAMIVPROC            glGetProgramiv        = NULL;
+static PFNGLGETPROGRAMINFOLOGPROC       glGetProgramInfoLog   = NULL;
+static PFNGLDELETEPROGRAMPROC           glDeleteProgram       = NULL;
+static PFNGLDELETESHADERPROC            glDeleteShader        = NULL;
+static PFNGLUSEPROGRAMPROC              glUseProgram          = NULL;
+static PFNGLVERTEXATTRIBPOINTERPROC     glVertexAttribPointer = NULL;
+static PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray = NULL;
+static PFNGLGETATTRIBLOCATIONPROC       glGetAttribLocation   = NULL;
+// NOTE: glViewport is a core 1.1 function already in opengl32.lib — do NOT load it via wglGetProcAddress.
+
+// ============================ App State ============================
+typedef struct App {
+    HINSTANCE hinst;
     HWND      hwnd;
     HDC       hdc;
-    HGLRC     hglrc;
-    LARGE_INTEGER qpf;
-    AppState  st;
-    wchar_t   shaderPathW[MAX_PATH];
-    uint64_t  shaderStamp;
+    HGLRC     glrc;
+
+    int       width, height;
+    bool      keys[256];
+    bool      running;
+
+    GLuint    program;
+    GLuint    vao, vbo;
 } App;
 
-// ============================== Utils ==============================
-static double now_sec(App* A){
-    LARGE_INTEGER qpc; QueryPerformanceCounter(&qpc);
-    return (double)qpc.QuadPart / (double)A->qpf.QuadPart;
-}
-static uint64_t file_mtime_u64W(const wchar_t* path){
-    WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) return 0ULL;
-    ULARGE_INTEGER u; u.LowPart = fad.ftLastWriteTime.dwLowDateTime; u.HighPart = fad.ftLastWriteTime.dwHighDateTime; 
-    return u.QuadPart;
-}
-static char* read_text_fileW(const wchar_t* path){
-    FILE* f = _wfopen(path, L"rb"); if(!f) return NULL;
-    fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
-    char* s=(char*)malloc(n+1); if(!s){ fclose(f); return NULL; }
-    fread(s,1,n,f); s[n]=0; fclose(f); return s;
-}
+static App g_app = {0};
 
-// ============================== GL Helpers ==============================
-static GLuint compile_shader(GLenum type, const char* src, const char* dbg){
-    GLuint s = glCreateShader(type);
-    glShaderSource(s,1,&src,NULL);
-    glCompileShader(s);
-    GLint ok=0; glGetShaderiv(s,GL_COMPILE_STATUS,&ok);
-    if(!ok){ GLint L=0; glGetShaderiv(s,GL_INFO_LOG_LENGTH,&L); char* log=(char*)malloc(L);
-        glGetShaderInfoLog(s,L,NULL,log); fprintf(stderr,"[Shader %s]\n%s\n", dbg, log); free(log); glDeleteShader(s); return 0; }
-    return s;
-}
-static GLuint link_prog(GLuint vs, GLuint fs){
-    GLuint p=glCreateProgram(); glAttachShader(p,vs); glAttachShader(p,fs); glLinkProgram(p);
-    GLint ok=0; glGetProgramiv(p,GL_LINK_STATUS,&ok);
-    if(!ok){ GLint L=0; glGetProgramiv(p,GL_INFO_LOG_LENGTH,&L); char* log=(char*)malloc(L);
-        glGetProgramInfoLog(p,L,NULL,log); fprintf(stderr,"[Link]\n%s\n",log); free(log); glDeleteProgram(p); return 0; }
-    return p;
+// Forward decls
+static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+
+// ==================== Helpers =====================================
+static void WinMsgBoxA(const char* title, const char* msg) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, msg, -1, NULL, 0);
+    int tlen = MultiByteToWideChar(CP_UTF8, 0, title, -1, NULL, 0);
+    WCHAR* wmsg = (WCHAR*)malloc(wlen * sizeof(WCHAR));
+    WCHAR* wttl = (WCHAR*)malloc(tlen * sizeof(WCHAR));
+    MultiByteToWideChar(CP_UTF8, 0, msg, -1, wmsg, wlen);
+    MultiByteToWideChar(CP_UTF8, 0, title, -1, wttl, tlen);
+    MessageBoxW(NULL, wmsg, wttl, MB_OK | MB_ICONERROR);
+    free(wmsg); free(wttl);
 }
 
-// Fullscreen quad
-static GLuint gVAO=0, gVBO=0;
-static void make_quad(){
-    float v[] = { // pos, uv
-        -1,-1, 0,0,   1,-1, 1,0,   1, 1, 1,1,
-        -1,-1, 0,0,   1, 1, 1,1,  -1, 1, 0,1
-    };
-    glGenVertexArrays(1, &gVAO);
-    glGenBuffers(1, &gVBO);
-    glBindVertexArray(gVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, gVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,4*sizeof(float),(void*)0);
-    glEnableVertexAttribArray(1); glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,4*sizeof(float),(void*)(2*sizeof(float)));
-    glBindVertexArray(0);
+static void BuildIdentity(float m[16]) {
+    memset(m, 0, sizeof(float)*16);
+    m[0]=1; m[5]=1; m[10]=1; m[15]=1;
+}
+static void BuildPerspectiveFovLH(float m[16], float fov, float aspect, float zn, float zf) {
+    float yScale = 1.0f / (float)tan(fov * 0.5f);
+    float xScale = yScale / aspect;
+    memset(m, 0, sizeof(float)*16);
+    m[0] = xScale;
+    m[5] = yScale;
+    m[10] = zf/(zf-zn);
+    m[11] = 1.0f;
+    m[14] = (-zn*zf)/(zf-zn);
 }
 
-static const char* VERT_SRC =
-"#version 330 core\n"
-"layout(location=0) in vec2 aPos;\n"
-"layout(location=1) in vec2 aUV;\n"
-"out vec2 vUV;\n"
-"void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
+// ==================== Temp context to load extensions ==============
+static bool CreateHiddenTempWindowAndLoadExtensions(void) {
+    WNDCLASSW wc = {0};
+    wc.style         = CS_OWNDC;
+    wc.lpfnWndProc   = DefWindowProcW;
+    wc.hInstance     = g_app.hinst;
+    wc.lpszClassName = L"TmpWGL";
+    if(!RegisterClassW(&wc)) return false;
 
-static const char* FRAG_PROLOG =
-"#version 330 core\n"
-"out vec4 FragColor;\n"
-"in vec2 vUV;\n"
-"uniform float iTime;\n"
-"uniform vec2  iResolution;\n"
-"uniform vec2  iMouse;\n"
-"uniform ivec2 iGrid;\n"
-"uniform bool  iPaused;\n"
-"uniform int   iFrame;\n"
-"uniform int   iSeed;\n"
-"void mainImage(out vec4 fragColor, in vec2 fragCoord, in ivec2 cell, in vec2 cellUV);\n";
+    HWND temp = CreateWindowW(wc.lpszClassName, L"", WS_OVERLAPPEDWINDOW,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 64, 64,
+                              NULL, NULL, g_app.hinst, NULL);
+    if(!temp) { UnregisterClassW(wc.lpszClassName, g_app.hinst); return false; }
 
-static const char* FRAG_DEFAULT_USER =
-"float hash(vec2 p){ return fract(sin(dot(p,vec2(41.0,289.0)))*43758.5453); }\n"
-"void mainImage(out vec4 fragColor, in vec2 fragCoord, in ivec2 cell, in vec2 cellUV){\n"
-"  vec2 uv = cellUV;\n"
-"  float t = iTime*0.5 + float(iSeed)*0.1 + hash(vec2(cell));\n"
-"  float v = 0.5+0.5*cos(6.2831*(uv.x+uv.y+t));\n"
-"  vec3 col = mix(vec3(0.05,0.1,0.2), vec3(0.9,0.8,0.2), v);\n"
-"  col *= 0.7 + 0.3*hash(vec2(cell)+0.123);\n"
-"  fragColor = vec4(col,1.0);\n"
-"}\n";
+    HDC tdc = GetDC(temp);
+    if(!tdc) { DestroyWindow(temp); UnregisterClassW(wc.lpszClassName, g_app.hinst); return false; }
 
-static const char* FRAG_EPILOG =
-"void main(){\n"
-"  vec2 fragCoord = vUV * iResolution;\n"
-"  vec2 gridSize   = vec2(max(1,iGrid.x), max(1,iGrid.y));\n"
-"  vec2 cellPix    = iResolution / gridSize;\n"
-"  ivec2 cell      = ivec2(clamp(floor(fragCoord / cellPix), vec2(0.0), gridSize-1.0));\n"
-"  vec2 cellUV     = fract(fragCoord / cellPix);\n"
-"  vec4 c; mainImage(c, fragCoord, cell, cellUV);\n"
-"  FragColor = c;\n"
-"}\n";
+    PIXELFORMATDESCRIPTOR pfd = {0};
+    pfd.nSize      = sizeof(pfd);
+    pfd.nVersion   = 1;
+    pfd.dwFlags    = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 24;
+    pfd.cDepthBits = 24;
+    pfd.cStencilBits=8;
 
-typedef struct {
-    GLuint prog;
-    GLint u_iTime, u_iRes, u_iMouse, u_iGrid, u_iPaused, u_iFrame, u_iSeed;
-} GLProg;
-
-static GLuint build_program_from_user(const char* user){
-    size_t N = strlen(FRAG_PROLOG)+strlen(user)+strlen(FRAG_EPILOG)+8;
-    char* fs = (char*)malloc(N);
-    strcpy(fs, FRAG_PROLOG); strcat(fs, user); strcat(fs, FRAG_EPILOG);
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, VERT_SRC, "VS");
-    if(!vs){ free(fs); return 0; }
-    GLuint fsid = compile_shader(GL_FRAGMENT_SHADER, fs, "FS(user+wrap)");
-    free(fs);
-    if(!fsid){ glDeleteShader(vs); return 0; }
-    GLuint p = link_prog(vs, fsid);
-    glDeleteShader(vs); glDeleteShader(fsid);
-    return p;
-}
-static void bind_uniforms(GLProg* gp){
-    gp->u_iTime  = glGetUniformLocation(gp->prog, "iTime");
-    gp->u_iRes   = glGetUniformLocation(gp->prog, "iResolution");
-    gp->u_iMouse = glGetUniformLocation(gp->prog, "iMouse");
-    gp->u_iGrid  = glGetUniformLocation(gp->prog, "iGrid");
-    gp->u_iPaused= glGetUniformLocation(gp->prog, "iPaused");
-    gp->u_iFrame = glGetUniformLocation(gp->prog, "iFrame");
-    gp->u_iSeed  = glGetUniformLocation(gp->prog, "iSeed");
-}
-
-// ============================== WGL Setup ==============================
-static bool wgl_make_context_33(HWND hwnd, HDC* outDC, HGLRC* outRC){
-    PIXELFORMATDESCRIPTOR pfd = {
-        sizeof(PIXELFORMATDESCRIPTOR), 1,
-        PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
-        PFD_TYPE_RGBA, 32,
-        8,0, 8,0, 8,0, 8,0, 24, 8, 0,
-        PFD_MAIN_PLANE, 0, 0,0,0
-    };
-    HDC hdc = GetDC(hwnd);
-    int pf = ChoosePixelFormat(hdc, &pfd);
-    if(!pf || !SetPixelFormat(hdc, pf, &pfd)) return false;
-
-    // temp legacy context
-    HGLRC temp = wglCreateContext(hdc);
-    if(!temp) return false;
-    wglMakeCurrent(hdc, temp);
-
-    // load WGL extensions
-    if (!gladLoadWGL(hdc)) return false;
-
-    // ask for 3.3 core context
-    int attribs[] = {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
-        WGL_CONTEXT_PROFILE_MASK_ARB,  WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
-#ifdef _DEBUG
-        WGL_CONTEXT_FLAGS_ARB, WGL_CONTEXT_DEBUG_BIT_ARB,
-#endif
-        0
-    };
-    HGLRC rc = NULL;
-    if (wglCreateContextAttribsARB)
-        rc = wglCreateContextAttribsARB(hdc, 0, attribs);
-    if (!rc) rc = temp; // fallback to legacy (not ideal)
-
-    if (rc != temp) {
-        wglMakeCurrent(NULL, NULL);
-        wglDeleteContext(temp);
-        wglMakeCurrent(hdc, rc);
+    int pf = ChoosePixelFormat(tdc, &pfd);
+    if(pf == 0 || !SetPixelFormat(tdc, pf, &pfd)) {
+        ReleaseDC(temp, tdc); DestroyWindow(temp); UnregisterClassW(wc.lpszClassName, g_app.hinst);
+        return false;
     }
 
-    if (!gladLoadGL((GLADloadfunc)wglGetProcAddress)) return false;
-    *outDC = hdc; *outRC = rc;
+    HGLRC trc = wglCreateContext(tdc);
+    if(!trc) {
+        ReleaseDC(temp, tdc); DestroyWindow(temp); UnregisterClassW(wc.lpszClassName, g_app.hinst);
+        return false;
+    }
+    if(!wglMakeCurrent(tdc, trc)) {
+        wglDeleteContext(trc);
+        ReleaseDC(temp, tdc); DestroyWindow(temp); UnregisterClassW(wc.lpszClassName, g_app.hinst);
+        return false;
+    }
+
+    p_wglChoosePixelFormatARB    = (PFNWGLCHOOSEPIXELFORMATARBPROC)   wglGetProcAddress("wglChoosePixelFormatARB");
+    p_wglCreateContextAttribsARB = (PFNWGLCREATECONTEXTATTRIBSARBPROC)wglGetProcAddress("wglCreateContextAttribsARB");
+    p_wglSwapIntervalEXT         = (PFNWGLSWAPINTERVALEXTPROC)        wglGetProcAddress("wglSwapIntervalEXT");
+
+    bool ok = (p_wglChoosePixelFormatARB && p_wglCreateContextAttribsARB);
+    wglMakeCurrent(NULL, NULL);
+    wglDeleteContext(trc);
+    ReleaseDC(temp, tdc);
+    DestroyWindow(temp);
+    UnregisterClassW(wc.lpszClassName, g_app.hinst);
+
+    return ok;
+}
+
+// ============ Load modern GL funcs after a real context is current =
+static bool LoadModernGLFunctions(void) {
+    glGenVertexArrays         = (PFNGLGENVERTEXARRAYSPROC)         wglGetProcAddress("glGenVertexArrays");
+    glBindVertexArray         = (PFNGLBINDVERTEXARRAYPROC)         wglGetProcAddress("glBindVertexArray");
+    glGenBuffers              = (PFNGLGENBUFFERSPROC)              wglGetProcAddress("glGenBuffers");
+    glBindBuffer              = (PFNGLBINDBUFFERPROC)              wglGetProcAddress("glBindBuffer");
+    glBufferData              = (PFNGLBUFFERDATAPROC)              wglGetProcAddress("glBufferData");
+    glCreateShader            = (PFNGLCREATESHADERPROC)            wglGetProcAddress("glCreateShader");
+    glShaderSource            = (PFNGLSHADERSOURCEPROC)            wglGetProcAddress("glShaderSource");
+    glCompileShader           = (PFNGLCOMPILESHADERPROC)           wglGetProcAddress("glCompileShader");
+    glGetShaderiv             = (PFNGLGETSHADERIVPROC)             wglGetProcAddress("glGetShaderiv");
+    glGetShaderInfoLog        = (PFNGLGETSHADERINFOLOGPROC)        wglGetProcAddress("glGetShaderInfoLog");
+    glCreateProgram           = (PFNGLCREATEPROGRAMPROC)           wglGetProcAddress("glCreateProgram");
+    glAttachShader            = (PFNGLATTACHSHADERPROC)            wglGetProcAddress("glAttachShader");
+    glLinkProgram             = (PFNGLLINKPROGRAMPROC)             wglGetProcAddress("glLinkProgram");
+    glGetProgramiv            = (PFNGLGETPROGRAMIVPROC)            wglGetProcAddress("glGetProgramiv");
+    glGetProgramInfoLog       = (PFNGLGETPROGRAMINFOLOGPROC)       wglGetProcAddress("glGetProgramInfoLog");
+    glDeleteProgram           = (PFNGLDELETEPROGRAMPROC)           wglGetProcAddress("glDeleteProgram");
+    glDeleteShader            = (PFNGLDELETESHADERPROC)            wglGetProcAddress("glDeleteShader");
+    glUseProgram              = (PFNGLUSEPROGRAMPROC)              wglGetProcAddress("glUseProgram");
+    glVertexAttribPointer     = (PFNGLVERTEXATTRIBPOINTERPROC)     wglGetProcAddress("glVertexAttribPointer");
+    glEnableVertexAttribArray = (PFNGLENABLEVERTEXATTRIBARRAYPROC) wglGetProcAddress("glEnableVertexAttribArray");
+    glGetAttribLocation       = (PFNGLGETATTRIBLOCATIONPROC)       wglGetProcAddress("glGetAttribLocation");
+    // DO NOT load glViewport — it's already provided by opengl32.lib
+
+    if(!glGenVertexArrays || !glBindVertexArray || !glGenBuffers || !glBindBuffer ||
+       !glBufferData || !glCreateShader || !glShaderSource || !glCompileShader ||
+       !glGetShaderiv || !glGetShaderInfoLog || !glCreateProgram || !glAttachShader ||
+       !glLinkProgram || !glGetProgramiv || !glGetProgramInfoLog || !glDeleteProgram ||
+       !glDeleteShader || !glUseProgram || !glVertexAttribPointer || !glEnableVertexAttribArray ||
+       !glGetAttribLocation) {
+        WinMsgBoxA("OpenGL function load failed",
+                   "One or more modern OpenGL functions could not be loaded.");
+        return false;
+    }
     return true;
 }
 
-// ============================== Win32 ==============================
-static App* GApp = NULL;
+// ======================= Real GL context setup =====================
+static bool InitOpenGLRealContext(HWND hwnd, int w, int h, bool vsync) {
+    g_app.hdc = GetDC(hwnd);
+    if(!g_app.hdc) return false;
 
-static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l){
-    App* A = GApp;
-    switch(m){
-        case WM_SIZE:
-            if (A){ A->st.winW = LOWORD(l); A->st.winH = HIWORD(l); glViewport(0,0,A->st.winW,A->st.winH); }
-            return 0;
-        case WM_LBUTTONDOWN: SetCapture(h); if(A){ A->st.mouseDown=1; } return 0;
-        case WM_LBUTTONUP:   ReleaseCapture(); if(A){ A->st.mouseDown=0; } return 0;
-        case WM_MOUSEMOVE:
-            if (A){ A->st.mouseX = (float)GET_X_LPARAM(l); A->st.mouseY = (float)(A->st.winH - GET_Y_LPARAM(l)); }
-            return 0;
-        case WM_KEYDOWN:
-            if (!A) break;
-            if (w==VK_ESCAPE) PostQuitMessage(0);
-            if (w=='P') A->st.paused = !A->st.paused;
-            if (w=='R') A->st.lastReloadCheck = -1.0;
-            if (w==VK_OEM_4 /*[*/) A->st.cols = (A->st.cols>1)? A->st.cols-1 : 1;
-            if (w==VK_OEM_6 /*]*/) A->st.cols = A->st.cols+1;
-            // Shift+[ and Shift+] emulate { and }
-            if ((GetKeyState(VK_SHIFT)&0x8000) && w==VK_OEM_4) A->st.rows = (A->st.rows>1)? A->st.rows-1 : 1;
-            if ((GetKeyState(VK_SHIFT)&0x8000) && w==VK_OEM_6) A->st.rows = A->st.rows+1;
-            return 0;
-        case WM_DESTROY: PostQuitMessage(0); return 0;
+    int attribs[] = {
+        WGL_SUPPORT_OPENGL_ARB, TRUE,
+        WGL_DRAW_TO_WINDOW_ARB, TRUE,
+        WGL_ACCELERATION_ARB,   WGL_FULL_ACCELERATION_ARB,
+        WGL_COLOR_BITS_ARB,     24,
+        WGL_DEPTH_BITS_ARB,     24,
+        WGL_STENCIL_BITS_ARB,   8,
+        WGL_DOUBLE_BUFFER_ARB,  TRUE,
+        WGL_SWAP_METHOD_ARB,    WGL_SWAP_EXCHANGE_ARB,
+        WGL_PIXEL_TYPE_ARB,     WGL_TYPE_RGBA_ARB,
+        0
+    };
+
+    int pixelFormat = 0;
+    UINT count = 0;
+    if(!p_wglChoosePixelFormatARB(g_app.hdc, attribs, NULL, 1, &pixelFormat, &count) || count == 0) {
+        return false;
     }
-    return DefWindowProcW(h,m,w,l);
+
+    PIXELFORMATDESCRIPTOR desc;
+    if(!DescribePixelFormat(g_app.hdc, pixelFormat, sizeof(desc), &desc)) return false;
+    if(!SetPixelFormat(g_app.hdc, pixelFormat, &desc)) return false;
+
+    int ctxAttribs[] = {
+        WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
+        WGL_CONTEXT_MINOR_VERSION_ARB, 0,
+        WGL_CONTEXT_PROFILE_MASK_ARB,  WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+        0
+    };
+
+    g_app.glrc = p_wglCreateContextAttribsARB(g_app.hdc, 0, ctxAttribs);
+    if(!g_app.glrc) return false;
+
+    if(!wglMakeCurrent(g_app.hdc, g_app.glrc)) return false;
+
+    if(!LoadModernGLFunctions()) return false;
+
+    glClearDepth(1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glFrontFace(GL_CW);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    glViewport(0, 0, w, h);
+
+    if(p_wglSwapIntervalEXT) p_wglSwapIntervalEXT(vsync ? 1 : 0);
+    return true;
 }
 
-// ============================== Entry ==============================
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int){
-    App A = {0}; GApp=&A; A.hInst=hInst; A.st.cols=4; A.st.rows=3; A.st.seed=1337;
-    QueryPerformanceFrequency(&A.qpf);
+static void ShutdownOpenGL(void) {
+    if(g_app.program) { glDeleteProgram(g_app.program); g_app.program = 0; }
+    if(g_app.glrc) {
+        wglMakeCurrent(NULL, NULL);
+        wglDeleteContext(g_app.glrc);
+        g_app.glrc = NULL;
+    }
+    if(g_app.hdc) {
+        ReleaseDC(g_app.hwnd, g_app.hdc);
+        g_app.hdc = NULL;
+    }
+}
 
-    // Paths
-    GetModuleFileNameW(NULL, A.shaderPathW, MAX_PATH);
-    wchar_t* slash = wcsrchr(A.shaderPathW, L'\\'); if (slash) *(slash+1)=0;
-    wcscat(A.shaderPathW, L"src/user_shader.glsl");
-    A.shaderStamp = file_mtime_u64W(A.shaderPathW);
+// =================== Shader helpers & triangle setup ===============
+static GLuint CompileShader(GLenum type, const char* src) {
+    GLuint sh = glCreateShader(type);
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if(!ok) {
+        GLint len = 0; glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &len);
+        char* log = (len > 1) ? (char*)malloc(len) : NULL;
+        if(log) { GLsizei got=0; glGetShaderInfoLog(sh, len, &got, log); WinMsgBoxA("Shader compile error", log); free(log); }
+        glDeleteShader(sh);
+        return 0;
+    }
+    return sh;
+}
 
-    // Window
-    WNDCLASSW wc = {0};
-    wc.style = CS_OWNDC; wc.lpfnWndProc = WndProc; wc.hInstance=hInst;
-    wc.lpszClassName = L"ShaderGridWin32"; wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    RegisterClassW(&wc);
-    RECT r = {0,0,1280,720}; AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"Shader Grid Lab (Win32+WGL)",
-        WS_OVERLAPPEDWINDOW|WS_VISIBLE, CW_USEDEFAULT,CW_USEDEFAULT,
-        r.right-r.left, r.bottom-r.top, NULL,NULL,hInst,NULL);
-    A.hwnd = hwnd;
+static GLuint LinkProgram(GLuint vs, GLuint fs) {
+    GLuint p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if(!ok) {
+        GLint len = 0; glGetProgramiv(p, GL_INFO_LOG_LENGTH, &len);
+        char* log = (len > 1) ? (char*)malloc(len) : NULL;
+        if(log) { GLsizei got=0; glGetProgramInfoLog(p, len, &got, log); WinMsgBoxA("Program link error", log); free(log); }
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
 
-    // GL context
-    if (!wgl_make_context_33(hwnd, &A.hdc, &A.hglrc)){
-        MessageBoxW(hwnd, L"OpenGL init failed", L"Error", MB_ICONERROR|MB_OK);
-        return 1;
+static bool CreateTrianglePipeline(void) {
+    const char* vs_src =
+        "#version 330 core\n"
+        "layout(location=0) in vec2 aPos;\n"
+        "layout(location=1) in vec3 aCol;\n"
+        "out vec3 vCol;\n"
+        "void main(){\n"
+        "  vCol = aCol;\n"
+        "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
+        "}\n";
+
+    const char* fs_src =
+        "#version 330 core\n"
+        "in vec3 vCol;\n"
+        "out vec4 FragColor;\n"
+        "void main(){\n"
+        "  FragColor = vec4(vCol, 1.0);\n"
+        "}\n";
+
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, vs_src);
+    if(!vs) return false;
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fs_src);
+    if(!fs) { glDeleteShader(vs); return false; }
+
+    g_app.program = LinkProgram(vs, fs);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if(!g_app.program) return false;
+
+    const float verts[] = {
+        //   x,     y,     r,    g,    b  (CW winding to match GL_CW front-face)
+        -0.6f, -0.5f,   1.0f, 0.0f, 0.0f,
+         0.0f,  0.6f,   0.0f, 0.0f, 1.0f,
+         0.6f, -0.5f,   0.0f, 1.0f, 0.0f,
+    };
+
+    glGenVertexArrays(1, &g_app.vao);
+    glBindVertexArray(g_app.vao);
+
+    glGenBuffers(1, &g_app.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, g_app.vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5 * (GLsizei)sizeof(float), (const void*)(0));
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5 * (GLsizei)sizeof(float), (const void*)(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+    return true;
+}
+
+// ============================== Draw ===============================
+static void BeginScene(float r, float g, float b, float a) {
+    glClearColor(r,g,b,a);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+static void EndScene(void) {
+    SwapBuffers(g_app.hdc);
+}
+static void DrawTriangle(void) {
+    glUseProgram(g_app.program);
+    glBindVertexArray(g_app.vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
+// ============================ Windowing ============================
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+
+static bool CreateMainWindowAndInitGL(int* outW, int* outH) {
+    WNDCLASSEXW wc = {0};
+    wc.cbSize        = sizeof(wc);
+    wc.style         = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = g_app.hinst;
+    wc.hIcon         = LoadIcon(NULL, IDI_WINLOGO);
+    wc.hIconSm       = wc.hIcon;
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = L"Engine";
+    if(!RegisterClassExW(&wc)) return false;
+
+    if(!CreateHiddenTempWindowAndLoadExtensions()) {
+        MessageBoxW(NULL, L"Could not initialize the OpenGL WGL extensions.", L"Error", MB_OK);
+        return false;
     }
 
-    // GL resources
-    make_quad();
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
 
-    // Build initial program
-    GLProg gp={0};
-    char* user = read_text_fileW(A.shaderPathW);
-    if(!user) user = _strdup(FRAG_DEFAULT_USER);
-    gp.prog = build_program_from_user(user);
-    if(!gp.prog){
-        fprintf(stderr,"Initial shader failed. Falling back.\n");
-        free(user); user = _strdup(FRAG_DEFAULT_USER);
-        gp.prog = build_program_from_user(user);
-        if(!gp.prog){ MessageBoxW(hwnd,L"Shader build failed",L"Error",MB_ICONERROR|MB_OK); return 1; }
+    int w = 800, h = 600;
+    int x = (sw - w)/2;
+    int y = (sh - h)/2;
+
+    DWORD exStyle = WS_EX_APPWINDOW;
+    DWORD style   = WS_POPUP;
+
+    g_app.hwnd = CreateWindowExW(exStyle, wc.lpszClassName, wc.lpszClassName, style,
+                                 x, y, w, h, NULL, NULL, g_app.hinst, NULL);
+    if(!g_app.hwnd) return false;
+
+    if(!InitOpenGLRealContext(g_app.hwnd, w, h, g_vsync_enabled)) {
+        MessageBoxW(g_app.hwnd, L"Could not initialize OpenGL (core context).", L"Error", MB_OK);
+        return false;
     }
-    bind_uniforms(&gp);
-    free(user);
 
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
+    if(!CreateTrianglePipeline()) return false;
 
-    A.st.startSec = now_sec(&A);
-    double prev = A.st.startSec;
+    ShowWindow(g_app.hwnd, SW_SHOW);
+    SetForegroundWindow(g_app.hwnd);
+    SetFocus(g_app.hwnd);
+    ShowCursor(FALSE);
 
-    // Main loop
-    MSG msg;
-    while (1){
-        while (PeekMessageW(&msg,NULL,0,0,PM_REMOVE)){
-            if (msg.message==WM_QUIT) goto end;
-            TranslateMessage(&msg); DispatchMessageW(&msg);
+    *outW = w; *outH = h;
+    return true;
+}
+
+static void DestroyMainWindow(void) {
+    ShowCursor(TRUE);
+    if(g_fullscreen) ChangeDisplaySettings(NULL, 0);
+    if(g_app.hwnd) {
+        DestroyWindow(g_app.hwnd);
+        g_app.hwnd = NULL;
+    }
+    UnregisterClassW(L"Engine", g_app.hinst);
+}
+
+// ========================= Message handling ========================
+static void OnKeyDown(WPARAM wparam) {
+    if(wparam < 256) g_app.keys[wparam] = true;
+}
+static void OnKeyUp(WPARAM wparam) {
+    if(wparam < 256) g_app.keys[wparam] = false;
+}
+
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    switch(msg) {
+    case WM_KEYDOWN: OnKeyDown(wparam); return 0;
+    case WM_KEYUP:   OnKeyUp(wparam);   return 0;
+    case WM_SIZE: {
+        int ww = LOWORD(lparam), hh = HIWORD(lparam);
+        if(ww > 0 && hh > 0 && g_app.hdc) glViewport(0, 0, ww, hh);
+    } return 0;
+    case WM_CLOSE:   PostQuitMessage(0); return 0;
+    default:         return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+}
+
+// =============================== WinMain ===========================
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
+    g_app.hinst = hInst;
+    memset(g_app.keys, 0, sizeof(g_app.keys));
+
+    int w=0, h=0;
+    if(!CreateMainWindowAndInitGL(&w, &h)) return 0;
+
+    g_app.running = true;
+    MSG msg; ZeroMemory(&msg, sizeof(msg));
+
+    while(g_app.running) {
+        while(PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if(msg.message == WM_QUIT) g_app.running = false;
         }
 
-        // hot-reload 10x/sec
-        double tnow = now_sec(&A);
-        if (A.st.lastReloadCheck + 0.1 < tnow){
-            A.st.lastReloadCheck = tnow;
-            uint64_t ts = file_mtime_u64W(A.shaderPathW);
-            if (ts && ts != A.shaderStamp){
-                A.shaderStamp = ts;
-                char* s = read_text_fileW(A.shaderPathW);
-                if(!s) s = _strdup(FRAG_DEFAULT_USER);
-                GLuint np = build_program_from_user(s);
-                if (np){
-                    glDeleteProgram(gp.prog);
-                    gp.prog = np; bind_uniforms(&gp);
-                    A.st.frame = 0;
-                    OutputDebugStringW(L"[Reloaded shader]\n");
-                } else {
-                    OutputDebugStringW(L"[Reload failed, keeping previous]\n");
-                }
-                free(s);
-            }
-        }
+        if(g_app.keys[VK_ESCAPE]) g_app.running = false;
 
-        // time
-        double dt = tnow - prev; prev = tnow;
-        if (A.st.paused) A.st.pausedAccum += dt;
-        float iTime = (float)(tnow - A.st.startSec - A.st.pausedAccum);
-
-        // draw
-        glDisable(GL_DEPTH_TEST);
-        glClearColor(0.05f,0.06f,0.08f,1.f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glUseProgram(gp.prog);
-        glUniform1f(gp.u_iTime, iTime);
-        glUniform2f(gp.u_iRes, (float)A.st.winW, (float)A.st.winH);
-        glUniform2f(gp.u_iMouse, A.st.mouseX, A.st.mouseY);
-        glUniform2i(gp.u_iGrid, A.st.cols, A.st.rows);
-        glUniform1i(gp.u_iPaused, A.st.paused?1:0);
-        glUniform1i(gp.u_iFrame, A.st.frame);
-        glUniform1i(gp.u_iSeed, A.st.seed);
-
-        glBindVertexArray(gVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        SwapBuffers(A.hdc);
-        A.st.frame++;
+        BeginScene(0.1f, 0.1f, 0.12f, 1.0f);
+        DrawTriangle();
+        EndScene();
     }
 
-end:
-    if (gp.prog) glDeleteProgram(gp.prog);
-    if (gVBO) glDeleteBuffers(1,&gVBO);
-    if (gVAO) glDeleteVertexArrays(1,&gVAO);
-    if (A.hglrc){ wglMakeCurrent(NULL,NULL); wglDeleteContext(A.hglrc); }
-    if (A.hdc) ReleaseDC(A.hwnd, A.hdc);
+    ShutdownOpenGL();
+    DestroyMainWindow();
     return 0;
 }
