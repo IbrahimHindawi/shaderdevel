@@ -7,5 +7,5 @@ uniform vec2  uResolution;
 uniform vec2  uMouse;
 
 void main() {
-    FragColor = vec4(vUV, 1.0, 1.0);
+    FragColor = vec4(vUV, 0.0, 1.0);
 }

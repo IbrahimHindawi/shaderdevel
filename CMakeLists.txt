@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(shader_grid_win32 C)
+project(shaderdevel C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
